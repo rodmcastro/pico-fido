@@ -40,6 +40,9 @@ jobs:
           path = Path("pico-keys-sdk/src/led/led_ws2812.c")
           text = path.read_text()
 
+          # ---------------------------------------------------------
+          # Force WS2812 GPIO to GPIO16.
+          # ---------------------------------------------------------
           old_gpio = """    uint8_t gpio = 0;
           #ifdef PICO_DEFAULT_WS2812_PIN
               gpio = PICO_DEFAULT_WS2812_PIN;
@@ -59,6 +62,9 @@ jobs:
 
           text = text.replace(old_gpio, new_gpio, 1)
 
+          # ---------------------------------------------------------
+          # Force GRB color order.
+          # ---------------------------------------------------------
           old_order = """    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PHY_LED_ORDER_GRB;
               switch (order) {
                   case PHY_LED_ORDER_RBG:
@@ -87,6 +93,9 @@ jobs:
 
           text = text.replace(old_order, new_order, 1)
 
+          # ---------------------------------------------------------
+          # Force maximum brightness and ignore PHY brightness.
+          # ---------------------------------------------------------
           old_brightness = """    if (!(phy_data.opts & PHY_OPT_DIMM)) {
                   progress = progress >= 0.5 ? 1 : 0;
               }
@@ -95,7 +104,8 @@ jobs:
               float brightness = ((float)led_brightness / MAX_BTNESS) * ((float)led_phy_btness / MAX_BTNESS) * progress;
           """
 
-          new_brightness = """    float brightness = progress >= 0.5 ? 1.0f : 0.0f;
+          new_brightness = """    (void)led_brightness;
+              float brightness = progress >= 0.5f ? 1.0f : 0.0f;
           """
 
           if old_brightness not in text:
@@ -118,6 +128,9 @@ jobs:
           path = Path("pico-keys-sdk/src/main.c")
           text = path.read_text()
 
+          # ---------------------------------------------------------
+          # Make sleep_ms() available.
+          # ---------------------------------------------------------
           include_marker = '#include "pico/stdio.h"\n'
           include_replacement = (
               '#include "pico/stdio.h"\n'
@@ -136,6 +149,10 @@ jobs:
                   1
               )
 
+          # ---------------------------------------------------------
+          # Replace normal startup LED/USB sequence with a direct
+          # LED diagnostic loop.
+          # ---------------------------------------------------------
           old_block = (
               '    led_init();\n'
               '\n'
@@ -144,21 +161,6 @@ jobs:
 
           new_block = (
               '    led_init();\n'
-              '\n'
-              '    led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n'
-              '    sleep_ms(1000);\n'
-              '\n'
-              '    led_driver->set_color(LED_COLOR_GREEN, MAX_BTNESS, 1.0f);\n'
-              '    sleep_ms(1000);\n'
-              '\n'
-              '    led_driver->set_color(LED_COLOR_BLUE, MAX_BTNESS, 1.0f);\n'
-              '    sleep_ms(1000);\n'
-              '\n'
-              '    led_driver->set_color(LED_COLOR_WHITE, MAX_BTNESS, 1.0f);\n'
-              '    sleep_ms(1000);\n'
-              '\n'
-              '    led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);\n'
-              '    sleep_ms(500);\n'
               '\n'
               '    while (true) {\n'
               '        led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n'
@@ -176,8 +178,6 @@ jobs:
               '        led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);\n'
               '        sleep_ms(500);\n'
               '    }\n'
-              '\n'
-              '    usb_init();\n'
           )
 
           if old_block not in text:
@@ -207,11 +207,11 @@ jobs:
             pico-keys-sdk/src/led/led_ws2812.c
 
           echo "=== WS2812 brightness ==="
-          grep -A2 -B2 "float brightness = progress >= 0.5" \
+          grep -A3 -B2 "(void)led_brightness" \
             pico-keys-sdk/src/led/led_ws2812.c
 
           echo "=== LED test loop ==="
-          grep -A24 -B3 "LED_COLOR_RED" \
+          grep -A24 -B3 "while (true)" \
             pico-keys-sdk/src/main.c
 
       - name: Build RP2350 Zero
