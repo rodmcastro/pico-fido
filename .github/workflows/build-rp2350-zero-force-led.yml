@@ -1,4 +1,4 @@
-name: Build RP2350 USB - Brute Force LED Test
+name: Build RP2350 Zero - LED Hardware Test
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -19,7 +19,11 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt update
-          sudo apt install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+          sudo apt install -y \
+            cmake \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
 
       - name: Install Pico SDK
         run: |
@@ -28,46 +32,278 @@ jobs:
           git checkout 2.1.1
           git submodule update --init
 
-      - name: Brute Force All GPIOs
+      # ==============================================================
+      # Patch the WS2812 driver so the test is completely independent
+      # of the LED configuration stored in the Pico Keys PHY data.
+      # ==============================================================
+
+      - name: Patch WS2812 driver for direct hardware test
         run: |
           python3 - <<'PY'
-          import re
           from pathlib import Path
+
+          path = Path("pico-keys-sdk/src/led/led_ws2812.c")
+          text = path.read_text()
+
+          # ----------------------------------------------------------
+          # 1. Force GPIO 16.
+          # ----------------------------------------------------------
+          old_gpio = (
+              "    uint8_t gpio = 0;\n"
+              "#ifdef PICO_DEFAULT_WS2812_PIN\n"
+              "    gpio = PICO_DEFAULT_WS2812_PIN;\n"
+              "#endif\n"
+              "    if (phy_data.led_gpio_present) {\n"
+              "        gpio = phy_data.led_gpio;\n"
+              "    }\n"
+          )
+
+          new_gpio = (
+              "    uint8_t gpio = 16;\n"
+          )
+
+          if old_gpio not in text:
+              raise SystemExit(
+                  "ERROR: original WS2812 GPIO block not found"
+              )
+
+          text = text.replace(old_gpio, new_gpio, 1)
+
+          # ----------------------------------------------------------
+          # 2. Force GRB byte order.
+          # ----------------------------------------------------------
+          old_order = (
+              "static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {\n"
+              "    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PHY_LED_ORDER_GRB;\n"
+              "    switch (order) {\n"
+              "        case PHY_LED_ORDER_RBG:\n"
+              "            return urgb_ordered_u32(r, b, g);\n"
+              "        case PHY_LED_ORDER_GRB:\n"
+              "            return urgb_ordered_u32(g, r, b);\n"
+              "        case PHY_LED_ORDER_GBR:\n"
+              "            return urgb_ordered_u32(g, b, r);\n"
+              "        case PHY_LED_ORDER_BRG:\n"
+              "            return urgb_ordered_u32(b, r, g);\n"
+              "        case PHY_LED_ORDER_BGR:\n"
+              "            return urgb_ordered_u32(b, g, r);\n"
+              "        case PHY_LED_ORDER_RGB:\n"
+              "        default:\n"
+              "            return urgb_ordered_u32(r, g, b);\n"
+              "    }\n"
+              "}\n"
+          )
+
+          new_order = (
+              "static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {\n"
+              "    return urgb_ordered_u32(g, r, b);\n"
+              "}\n"
+          )
+
+          if old_order not in text:
+              raise SystemExit(
+                  "ERROR: original WS2812 color-order block not found"
+              )
+
+          text = text.replace(old_order, new_order, 1)
+
+          # ----------------------------------------------------------
+          # 3. Force 100% brightness.
+          #    PHY brightness and dimming are ignored.
+          # ----------------------------------------------------------
+          old_brightness = (
+              "static void led_driver_color_ws2812(uint8_t color, uint32_t led_brightness, float progress) {\n"
+              "    if (!(phy_data.opts & PHY_OPT_DIMM)) {\n"
+              "        progress = progress >= 0.5 ? 1 : 0;\n"
+              "    }\n"
+              "    uint32_t led_phy_btness = phy_data.led_brightness_present ? phy_data.led_brightness : MAX_BTNESS;\n"
+              "\n"
+              "    float brightness = ((float)led_brightness / MAX_BTNESS) * ((float)led_phy_btness / MAX_BTNESS) * progress;\n"
+              "    struct urgb_color pixel_color = urgb_color_table[color];\n"
+          )
+
+          new_brightness = (
+              "static void led_driver_color_ws2812(uint8_t color, uint32_t led_brightness, float progress) {\n"
+              "    (void)led_brightness;\n"
+              "\n"
+              "    float brightness = progress >= 0.5f ? 1.0f : 0.0f;\n"
+              "    struct urgb_color pixel_color = urgb_color_table[color];\n"
+          )
+
+          if old_brightness not in text:
+              raise SystemExit(
+                  "ERROR: original WS2812 brightness block not found"
+              )
+
+          text = text.replace(old_brightness, new_brightness, 1)
+
+          path.write_text(text)
+
+          print("Direct WS2812 hardware-test patch applied successfully.")
+          PY
+
+      # ==============================================================
+      # Replace normal Pico FIDO startup with a direct WS2812 test.
+      # IMPORTANT:
+      # led_init() is deliberately NOT called.
+      # This bypasses PHY LED configuration entirely.
+      # ==============================================================
+
+      - name: Patch firmware for direct LED test loop
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
           path = Path("pico-keys-sdk/src/main.c")
           text = path.read_text()
 
-          # Adiciona a biblioteca padrão de GPIO se não existir
-          if '#include "pico/stdlib.h"' not in text:
-              text = text.replace('#include "pico/stdio.h"', '#include "pico/stdio.h"\n#include "pico/stdlib.h"')
+          # ----------------------------------------------------------
+          # Make sleep_ms() explicitly available.
+          # ----------------------------------------------------------
+          include_needle = '#include "pico/stdio.h"\n'
 
-          # Substitui a inicialização normal pelo pisca-pisca em todos os pinos
-          new_block = """
-              for(int i=0; i<=29; i++) {
-                  gpio_init(i);
-                  gpio_set_dir(i, GPIO_OUT);
-              }
-              while (true) {
-                  for(int i=0; i<=29; i++) gpio_put(i, 1);
-                  sleep_ms(500);
-                  for(int i=0; i<=29; i++) gpio_put(i, 0);
-                  sleep_ms(500);
-              }"""
-          
-          text = re.sub(r'led_init\(\);\s*usb_init\(\);', new_block, text)
+          include_replacement = (
+              '#include "pico/stdio.h"\n'
+              '#include "pico/time.h"\n'
+          )
+
+          if include_needle not in text:
+              raise SystemExit(
+                  'ERROR: #include "pico/stdio.h" not found'
+              )
+
+          if '#include "pico/time.h"\n' not in text:
+              text = text.replace(
+                  include_needle,
+                  include_replacement,
+                  1
+              )
+
+          # ----------------------------------------------------------
+          # Declare the WS2812 driver defined in led_ws2812.c.
+          # ----------------------------------------------------------
+          led_include = '#include "led/led.h"\n'
+
+          led_include_replacement = (
+              '#include "led/led.h"\n'
+              '\n'
+              'extern led_driver_t led_driver_ws2812;\n'
+          )
+
+          if led_include not in text:
+              raise SystemExit(
+                  'ERROR: #include "led/led.h" not found'
+              )
+
+          if 'extern led_driver_t led_driver_ws2812;\n' not in text:
+              text = text.replace(
+                  led_include,
+                  led_include_replacement,
+                  1
+              )
+
+          # ----------------------------------------------------------
+          # Replace normal LED/USB initialization.
+          #
+          # The resulting firmware:
+          #   1. selects WS2812 driver directly
+          #   2. initializes WS2812 PIO
+          #   3. drives GPIO16
+          #   4. cycles RED/GREEN/BLUE/WHITE/OFF forever
+          # ----------------------------------------------------------
+          old_startup = (
+              "    led_init();\n"
+              "\n"
+              "    usb_init();\n"
+          )
+
+          new_startup = (
+              "    /* Direct WS2812 hardware test. */\n"
+              "    led_driver = &led_driver_ws2812;\n"
+              "    led_driver->init();\n"
+              "\n"
+              "    while (true) {\n"
+              "        led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n"
+              "        sleep_ms(1000);\n"
+              "\n"
+              "        led_driver->set_color(LED_COLOR_GREEN, MAX_BTNESS, 1.0f);\n"
+              "        sleep_ms(1000);\n"
+              "\n"
+              "        led_driver->set_color(LED_COLOR_BLUE, MAX_BTNESS, 1.0f);\n"
+              "        sleep_ms(1000);\n"
+              "\n"
+              "        led_driver->set_color(LED_COLOR_WHITE, MAX_BTNESS, 1.0f);\n"
+              "        sleep_ms(1000);\n"
+              "\n"
+              "        led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);\n"
+              "        sleep_ms(500);\n"
+              "    }\n"
+          )
+
+          if old_startup not in text:
+              raise SystemExit(
+                  "ERROR: normal led_init()/usb_init() block not found"
+              )
+
+          text = text.replace(
+              old_startup,
+              new_startup,
+              1
+          )
+
           path.write_text(text)
+
+          print("Direct WS2812 test loop applied successfully.")
           PY
 
-      - name: Build Generic Pico 2
+      # ==============================================================
+      # Verify exactly what will be compiled.
+      # ==============================================================
+
+      - name: Verify hardware-test patches
+        run: |
+          echo "=================================================="
+          echo "WS2812 GPIO"
+          echo "=================================================="
+          grep -A5 -B2 "uint8_t gpio = 16" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=================================================="
+          echo "WS2812 COLOR ORDER"
+          echo "=================================================="
+          grep -A2 -B2 "return urgb_ordered_u32(g, r, b)" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=================================================="
+          echo "WS2812 BRIGHTNESS"
+          echo "=================================================="
+          grep -A4 -B2 "(void)led_brightness" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=================================================="
+          echo "DIRECT DRIVER"
+          echo "=================================================="
+          grep -A28 -B5 "Direct WS2812 hardware test" \
+            pico-keys-sdk/src/main.c
+
+      # ==============================================================
+      # Build
+      # ==============================================================
+
+      - name: Build RP2350 Zero
         env:
           PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
         run: |
           mkdir -p build
           cd build
-          cmake .. -DPICO_BOARD=pico2
+          cmake .. -DPICO_BOARD=waveshare_rp2350_zero
           make -j$(nproc)
+
+      # ==============================================================
+      # Upload UF2
+      # ==============================================================
 
       - name: Upload UF2
         uses: actions/upload-artifact@v4
         with:
-          name: pico-fido-rp2350-brute-force
+          name: pico-fido-rp2350-zero-led-hardware-test-direct
           path: build/pico_fido.uf2
