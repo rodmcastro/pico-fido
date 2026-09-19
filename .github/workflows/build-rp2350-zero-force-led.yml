@@ -1,4 +1,4 @@
-name: Build RP2350 USB - FIDO2 LED GPIO 23
+name: Build RP2350 USB - FIDO2 LED GPIO 16
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ jobs:
           git checkout 2.1.1
           git submodule update --init
 
-      - name: Force WS2812 LED on GPIO 23
+      - name: Force WS2812 LED on GPIO 16
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -38,7 +38,7 @@ jobs:
           block = """void led_init(void) {
           #ifdef WAVESHARE_RP2350_ZERO
               phy_data.led_driver = PHY_LED_DRIVER_WS2812;
-              phy_data.led_gpio = 23; // Pino do LED RGB nas placas Clone USB
+              phy_data.led_gpio = 16; // Pino oficial do LED WS2812
               phy_data.led_driver_present = true;
               phy_data.led_gpio_present = true;
               phy_data.led_order = PHY_LED_ORDER_GRB;
@@ -64,5 +64,5 @@ jobs:
       - name: Upload UF2
         uses: actions/upload-artifact@v4
         with:
-          name: pico-fido-rp2350-led-gpio23
+          name: pico-fido-rp2350-led-gpio16
           path: build/pico_fido.uf2
