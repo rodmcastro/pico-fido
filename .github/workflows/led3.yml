@@ -1,0 +1,233 @@
+name: Build RP2350 Zero - LED Hardware Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            cmake \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
+
+      - name: Install Pico SDK
+        run: |
+          git clone https://github.com/raspberrypi/pico-sdk
+          cd pico-sdk
+          git checkout 2.1.1
+          git submodule update --init
+
+      - name: Patch WS2812 driver for direct hardware test
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("pico-keys-sdk/src/led/led_ws2812.c")
+          text = path.read_text()
+
+          # Force WS2812 GPIO to GPIO16.
+          gpio_pattern = re.compile(
+              r'    uint8_t gpio = 0;\n'
+              r'#ifdef PICO_DEFAULT_WS2812_PIN\n'
+              r'        gpio = PICO_DEFAULT_WS2812_PIN;\n'
+              r'#endif\n'
+              r'        if \(phy_data\.led_gpio_present\) \{\n'
+              r'            gpio = phy_data\.led_gpio;\n'
+              r'        \}\n'
+          )
+
+          gpio_replacement = (
+              '    uint8_t gpio = 16;\n'
+          )
+
+          text, count = gpio_pattern.subn(
+              gpio_replacement,
+              text,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit(
+                  "ERROR: could not patch WS2812 GPIO block"
+              )
+
+          # Force GRB color order.
+          order_pattern = re.compile(
+              r'    uint8_t order = phy_data\.led_order_present \? '
+              r'phy_data\.led_order : PHY_LED_ORDER_GRB;\n'
+              r'    switch \(order\) \{\n'
+              r'.*?'
+              r'    \}\n',
+              re.DOTALL
+          )
+
+          order_replacement = (
+              '    return urgb_ordered_u32(g, r, b);\n'
+          )
+
+          text, count = order_pattern.subn(
+              order_replacement,
+              text,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit(
+                  "ERROR: could not patch WS2812 color order"
+              )
+
+          # Force 100% brightness and ignore PHY brightness/dimming.
+          brightness_pattern = re.compile(
+              r'    if \(!\(phy_data\.opts & PHY_OPT_DIMM\)\) \{\n'
+              r'        progress = progress >= 0\.5 \? 1 : 0;\n'
+              r'    \}\n'
+              r'    uint32_t led_phy_btness = '
+              r'phy_data\.led_brightness_present \? '
+              r'phy_data\.led_brightness : MAX_BTNESS;\n'
+              r'\n'
+              r'    float brightness = '
+              r'\(\(float\)led_brightness / MAX_BTNESS\) \* '
+              r'\(\(float\)led_phy_btness / MAX_BTNESS\) \* progress;\n'
+          )
+
+          brightness_replacement = (
+              '    float brightness = progress >= 0.5 ? 1.0f : 0.0f;\n'
+          )
+
+          text, count = brightness_pattern.subn(
+              brightness_replacement,
+              text,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit(
+                  "ERROR: could not patch WS2812 brightness"
+              )
+
+          path.write_text(text)
+          print("Direct WS2812 hardware-test patch applied.")
+          PY
+
+      - name: Patch firmware for direct LED test loop
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("pico-keys-sdk/src/main.c")
+          text = path.read_text()
+
+          # Ensure sleep_ms() is available.
+          include_marker = '#include "pico/stdio.h"\n'
+          include_replacement = (
+              '#include "pico/stdio.h"\n'
+              '#include "pico/time.h"\n'
+          )
+
+          if include_marker not in text:
+              raise SystemExit(
+                  'ERROR: pico/stdio.h include not found'
+              )
+
+          if '#include "pico/time.h"' not in text:
+              text = text.replace(
+                  include_marker,
+                  include_replacement,
+                  1
+              )
+
+          # Replace the startup sequence after led_init().
+          old_block = (
+              '    led_init();\n'
+              '\n'
+              '    usb_init();\n'
+          )
+
+          new_block = (
+              '    led_init();\n'
+              '\n'
+              '#ifdef PICO_PLATFORM\n'
+              '    while (true) {\n'
+              '        led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_GREEN, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_BLUE, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_WHITE, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);\n'
+              '        sleep_ms(500);\n'
+              '    }\n'
+              '#endif\n'
+              '\n'
+              '    usb_init();\n'
+          )
+
+          if old_block not in text:
+              raise SystemExit(
+                  "ERROR: led_init()/usb_init() block not found"
+              )
+
+          text = text.replace(
+              old_block,
+              new_block,
+              1
+          )
+
+          path.write_text(text)
+          print("Direct LED test loop applied.")
+          PY
+
+      - name: Verify hardware-test patches
+        run: |
+          echo "=== WS2812 GPIO ==="
+          grep -A4 -B2 "uint8_t gpio = 16" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=== WS2812 color order ==="
+          grep -A4 -B2 "return urgb_ordered_u32(g, r, b)" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=== WS2812 brightness ==="
+          grep -A6 -B2 "float brightness = progress >= 0.5" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=== Direct LED loop ==="
+          grep -A22 -B3 "LED_COLOR_RED" \
+            pico-keys-sdk/src/main.c
+
+      - name: Build RP2350 Zero
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DPICO_BOARD=waveshare_rp2350_zero
+          make -j$(nproc)
+
+      - name: Upload UF2
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-fido-rp2350-zero-led-hardware-test
+          path: build/pico_fido.uf2
