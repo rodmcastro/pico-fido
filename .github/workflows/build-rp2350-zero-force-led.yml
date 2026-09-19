@@ -32,7 +32,85 @@ jobs:
           git checkout 2.1.1
           git submodule update --init
 
-      - name: Patch firmware for direct WS2812 hardware test
+      - name: Patch WS2812 driver
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("pico-keys-sdk/src/led/led_ws2812.c")
+          text = path.read_text()
+
+          old_gpio = """    uint8_t gpio = 0;
+          #ifdef PICO_DEFAULT_WS2812_PIN
+              gpio = PICO_DEFAULT_WS2812_PIN;
+          #endif
+              if (phy_data.led_gpio_present) {
+                  gpio = phy_data.led_gpio;
+              }
+          """
+
+          new_gpio = """    uint8_t gpio = 16;
+          """
+
+          if old_gpio not in text:
+              raise SystemExit(
+                  "ERROR: WS2812 GPIO block not found"
+              )
+
+          text = text.replace(old_gpio, new_gpio, 1)
+
+          old_order = """    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PHY_LED_ORDER_GRB;
+              switch (order) {
+                  case PHY_LED_ORDER_RBG:
+                      return urgb_ordered_u32(r, b, g);
+                  case PHY_LED_ORDER_GRB:
+                      return urgb_ordered_u32(g, r, b);
+                  case PHY_LED_ORDER_GBR:
+                      return urgb_ordered_u32(g, b, r);
+                  case PHY_LED_ORDER_BRG:
+                      return urgb_ordered_u32(b, r, g);
+                  case PHY_LED_ORDER_BGR:
+                      return urgb_ordered_u32(b, g, r);
+                  case PHY_LED_ORDER_RGB:
+                  default:
+                      return urgb_ordered_u32(r, g, b);
+              }
+          """
+
+          new_order = """    return urgb_ordered_u32(g, r, b);
+          """
+
+          if old_order not in text:
+              raise SystemExit(
+                  "ERROR: WS2812 color-order block not found"
+              )
+
+          text = text.replace(old_order, new_order, 1)
+
+          old_brightness = """    if (!(phy_data.opts & PHY_OPT_DIMM)) {
+                  progress = progress >= 0.5 ? 1 : 0;
+              }
+              uint32_t led_phy_btness = phy_data.led_brightness_present ? phy_data.led_brightness : MAX_BTNESS;
+
+              float brightness = ((float)led_brightness / MAX_BTNESS) * ((float)led_phy_btness / MAX_BTNESS) * progress;
+          """
+
+          new_brightness = """    float brightness = progress >= 0.5 ? 1.0f : 0.0f;
+          """
+
+          if old_brightness not in text:
+              raise SystemExit(
+                  "ERROR: WS2812 brightness block not found"
+              )
+
+          text = text.replace(old_brightness, new_brightness, 1)
+
+          path.write_text(text)
+
+          print("WS2812 driver patch applied successfully.")
+          PY
+
+      - name: Patch main for LED-only diagnostic loop
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -40,9 +118,6 @@ jobs:
           path = Path("pico-keys-sdk/src/main.c")
           text = path.read_text()
 
-          # ---------------------------------------------------------
-          # Ensure sleep_ms() is available.
-          # ---------------------------------------------------------
           include_marker = '#include "pico/stdio.h"\n'
           include_replacement = (
               '#include "pico/stdio.h"\n'
@@ -61,10 +136,6 @@ jobs:
                   1
               )
 
-          # ---------------------------------------------------------
-          # Replace normal LED initialization with a direct
-          # WS2812 hardware test.
-          # ---------------------------------------------------------
           old_block = (
               '    led_init();\n'
               '\n'
@@ -72,22 +143,22 @@ jobs:
           )
 
           new_block = (
-              '    /* Direct WS2812 hardware test. */\n'
-              '    extern led_driver_t led_driver_ws2812;\n'
+              '    led_init();\n'
               '\n'
-              '    /* Force Waveshare RP2350 Zero onboard LED parameters. */\n'
-              '    phy_data.led_gpio = 16;\n'
-              '    phy_data.led_gpio_present = true;\n'
-              '    phy_data.led_driver = PHY_LED_DRIVER_WS2812;\n'
-              '    phy_data.led_driver_present = true;\n'
-              '    phy_data.led_order = PHY_LED_ORDER_GRB;\n'
-              '    phy_data.led_order_present = true;\n'
-              '    phy_data.led_brightness = MAX_BTNESS;\n'
-              '    phy_data.led_brightness_present = true;\n'
-              '    phy_data.opts |= PHY_OPT_DIMM;\n'
+              '    led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n'
+              '    sleep_ms(1000);\n'
               '\n'
-              '    led_driver = &led_driver_ws2812;\n'
-              '    led_driver->init();\n'
+              '    led_driver->set_color(LED_COLOR_GREEN, MAX_BTNESS, 1.0f);\n'
+              '    sleep_ms(1000);\n'
+              '\n'
+              '    led_driver->set_color(LED_COLOR_BLUE, MAX_BTNESS, 1.0f);\n'
+              '    sleep_ms(1000);\n'
+              '\n'
+              '    led_driver->set_color(LED_COLOR_WHITE, MAX_BTNESS, 1.0f);\n'
+              '    sleep_ms(1000);\n'
+              '\n'
+              '    led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);\n'
+              '    sleep_ms(500);\n'
               '\n'
               '    while (true) {\n'
               '        led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n'
@@ -122,17 +193,25 @@ jobs:
 
           path.write_text(text)
 
-          print("Direct WS2812 hardware-test firmware patch applied.")
+          print("LED diagnostic loop applied successfully.")
           PY
 
-      - name: Verify hardware-test patch
+      - name: Verify patches
         run: |
-          echo "=== Direct WS2812 configuration ==="
-          grep -A18 -B3 "Direct WS2812 hardware test" \
-            pico-keys-sdk/src/main.c
+          echo "=== WS2812 GPIO ==="
+          grep -A2 -B2 "uint8_t gpio = 16" \
+            pico-keys-sdk/src/led/led_ws2812.c
 
-          echo "=== LED color sequence ==="
-          grep -A22 "while (true)" \
+          echo "=== WS2812 color order ==="
+          grep -A1 -B2 "return urgb_ordered_u32(g, r, b)" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=== WS2812 brightness ==="
+          grep -A2 -B2 "float brightness = progress >= 0.5" \
+            pico-keys-sdk/src/led/led_ws2812.c
+
+          echo "=== LED test loop ==="
+          grep -A24 -B3 "LED_COLOR_RED" \
             pico-keys-sdk/src/main.c
 
       - name: Build RP2350 Zero
