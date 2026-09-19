@@ -41,71 +41,74 @@ jobs:
           path = Path("pico-keys-sdk/src/led/led_ws2812.c")
           text = path.read_text()
 
-          # ------------------------------------------------------------
-          # 1. Force WS2812 data pin to GPIO 16.
-          # ------------------------------------------------------------
+          # Force WS2812 GPIO to GPIO16.
           gpio_pattern = re.compile(
-              r"""    uint8_t gpio = 0;
-          #ifdef PICO_DEFAULT_WS2812_PIN
-              gpio = PICO_DEFAULT_WS2812_PIN;
-          #endif
-              if \(phy_data\.led_gpio_present\) \{
-                  gpio = phy_data\.led_gpio;
-              \}
-          """
+              r'    uint8_t gpio = 0;\n'
+              r'#ifdef PICO_DEFAULT_WS2812_PIN\n'
+              r'        gpio = PICO_DEFAULT_WS2812_PIN;\n'
+              r'#endif\n'
+              r'        if \(phy_data\.led_gpio_present\) \{\n'
+              r'            gpio = phy_data\.led_gpio;\n'
+              r'        \}\n'
           )
 
-          gpio_replacement = """    uint8_t gpio = 16;
-          """
+          gpio_replacement = (
+              '    uint8_t gpio = 16;\n'
+          )
 
-          text, count = gpio_pattern.subn(gpio_replacement, text, count=1)
+          text, count = gpio_pattern.subn(
+              gpio_replacement,
+              text,
+              count=1
+          )
 
           if count != 1:
               raise SystemExit(
-                  "ERROR: could not patch the WS2812 GPIO block"
+                  "ERROR: could not patch WS2812 GPIO block"
               )
 
-          # ------------------------------------------------------------
-          # 2. Force GRB byte order.
-          # ------------------------------------------------------------
+          # Force GRB color order.
           order_pattern = re.compile(
-              r"""static inline uint32_t urgb_u32\(uint8_t r, uint8_t g, uint8_t b\) \{
-              .*?
-          \}
-          """,
-              re.DOTALL,
+              r'    uint8_t order = phy_data\.led_order_present \? '
+              r'phy_data\.led_order : PHY_LED_ORDER_GRB;\n'
+              r'    switch \(order\) \{\n'
+              r'.*?'
+              r'    \}\n',
+              re.DOTALL
           )
 
-          order_replacement = """static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {
-              return urgb_ordered_u32(g, r, b);
-          }
-          """
+          order_replacement = (
+              '    return urgb_ordered_u32(g, r, b);\n'
+          )
 
-          text, count = order_pattern.subn(order_replacement, text, count=1)
+          text, count = order_pattern.subn(
+              order_replacement,
+              text,
+              count=1
+          )
 
           if count != 1:
               raise SystemExit(
-                  "ERROR: could not patch the WS2812 color-order function"
+                  "ERROR: could not patch WS2812 color order"
               )
 
-          # ------------------------------------------------------------
-          # 3. Force 100% brightness and ignore PHY brightness/dimming.
-          # ------------------------------------------------------------
+          # Force 100% brightness and ignore PHY brightness/dimming.
           brightness_pattern = re.compile(
-              r"""static void led_driver_color_ws2812\(uint8_t color, uint32_t led_brightness, float progress\) \{
-              .*?
-              struct urgb_color pixel_color = urgb_color_table\[color\];
-          """,
-              re.DOTALL,
+              r'    if \(!\(phy_data\.opts & PHY_OPT_DIMM\)\) \{\n'
+              r'        progress = progress >= 0\.5 \? 1 : 0;\n'
+              r'    \}\n'
+              r'    uint32_t led_phy_btness = '
+              r'phy_data\.led_brightness_present \? '
+              r'phy_data\.led_brightness : MAX_BTNESS;\n'
+              r'\n'
+              r'    float brightness = '
+              r'\(\(float\)led_brightness / MAX_BTNESS\) \* '
+              r'\(\(float\)led_phy_btness / MAX_BTNESS\) \* progress;\n'
           )
 
-          brightness_replacement = """static void led_driver_color_ws2812(uint8_t color, uint32_t led_brightness, float progress) {
-              (void)led_brightness;
-
-              float brightness = progress >= 0.5 ? 1.0f : 0.0f;
-
-              struct urgb_color pixel_color = urgb_color_table[color];
-          """
+          brightness_replacement = (
+              '    float brightness = progress >= 0.5 ? 1.0f : 0.0f;\n'
+          )
 
           text, count = brightness_pattern.subn(
               brightness_replacement,
@@ -115,7 +118,7 @@ jobs:
 
           if count != 1:
               raise SystemExit(
-                  "ERROR: could not patch the WS2812 brightness function"
+                  "ERROR: could not patch WS2812 brightness"
               )
 
           path.write_text(text)
@@ -130,65 +133,65 @@ jobs:
           path = Path("pico-keys-sdk/src/main.c")
           text = path.read_text()
 
-          # ------------------------------------------------------------
-          # Make sleep_ms() explicitly available.
-          # ------------------------------------------------------------
-          include_needle = '#include "pico/stdio.h"\n'
-          include_replacement = '#include "pico/stdio.h"\n#include "pico/time.h"\n'
+          # Ensure sleep_ms() is available.
+          include_marker = '#include "pico/stdio.h"\n'
+          include_replacement = (
+              '#include "pico/stdio.h"\n'
+              '#include "pico/time.h"\n'
+          )
 
-          if include_needle not in text:
+          if include_marker not in text:
               raise SystemExit(
-                  'ERROR: could not find #include "pico/stdio.h"'
+                  'ERROR: pico/stdio.h include not found'
               )
 
           if '#include "pico/time.h"' not in text:
               text = text.replace(
-                  include_needle,
+                  include_marker,
                   include_replacement,
                   1
               )
 
-          # ------------------------------------------------------------
-          # Replace the normal startup path after led_init() with a
-          # simple repeating RGB test.
-          # ------------------------------------------------------------
-          loop_needle = """    led_init();
+          # Replace the startup sequence after led_init().
+          old_block = (
+              '    led_init();\n'
+              '\n'
+              '    usb_init();\n'
+          )
 
-    usb_init();
-"""
+          new_block = (
+              '    led_init();\n'
+              '\n'
+              '#ifdef PICO_PLATFORM\n'
+              '    while (true) {\n'
+              '        led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_GREEN, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_BLUE, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_WHITE, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);\n'
+              '        sleep_ms(500);\n'
+              '    }\n'
+              '#endif\n'
+              '\n'
+              '    usb_init();\n'
+          )
 
-          loop_replacement = """    led_init();
-
-#ifdef PICO_PLATFORM
-    while (true) {
-        led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);
-        sleep_ms(1000);
-
-        led_driver->set_color(LED_COLOR_GREEN, MAX_BTNESS, 1.0f);
-        sleep_ms(1000);
-
-        led_driver->set_color(LED_COLOR_BLUE, MAX_BTNESS, 1.0f);
-        sleep_ms(1000);
-
-        led_driver->set_color(LED_COLOR_WHITE, MAX_BTNESS, 1.0f);
-        sleep_ms(1000);
-
-        led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);
-        sleep_ms(500);
-    }
-#endif
-
-    usb_init();
-"""
-
-          if loop_needle not in text:
+          if old_block not in text:
               raise SystemExit(
-                  "ERROR: could not find the led_init()/usb_init() startup block"
+                  "ERROR: led_init()/usb_init() block not found"
               )
 
           text = text.replace(
-              loop_needle,
-              loop_replacement,
+              old_block,
+              new_block,
               1
           )
 
@@ -207,7 +210,7 @@ jobs:
             pico-keys-sdk/src/led/led_ws2812.c
 
           echo "=== WS2812 brightness ==="
-          grep -A8 -B2 "float brightness = progress >= 0.5" \
+          grep -A6 -B2 "float brightness = progress >= 0.5" \
             pico-keys-sdk/src/led/led_ws2812.c
 
           echo "=== Direct LED loop ==="
