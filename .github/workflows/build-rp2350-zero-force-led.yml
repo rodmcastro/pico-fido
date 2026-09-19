@@ -46,10 +46,17 @@ jobs:
           #ifdef WAVESHARE_RP2350_ZERO
               phy_data.led_driver = PHY_LED_DRIVER_WS2812;
               phy_data.led_gpio = PICO_DEFAULT_WS2812_PIN;
+
               phy_data.led_driver_present = true;
               phy_data.led_gpio_present = true;
+
               phy_data.led_order = PHY_LED_ORDER_GRB;
               phy_data.led_order_present = true;
+
+              phy_data.led_brightness = MAX_BTNESS;
+              phy_data.led_brightness_present = true;
+
+              phy_data.opts &= ~PHY_OPT_DIMM;
           #endif
           """
 
@@ -65,7 +72,7 @@ jobs:
 
       - name: Verify LED patch
         run: |
-          grep -A10 -B2 "WAVESHARE_RP2350_ZERO" pico-keys-sdk/src/led/led.c
+          grep -A18 -B2 "WAVESHARE_RP2350_ZERO" pico-keys-sdk/src/led/led.c
 
       - name: Build RP2350 Zero
         env:
