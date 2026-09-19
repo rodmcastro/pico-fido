@@ -32,97 +32,90 @@ jobs:
           git checkout 2.1.1
           git submodule update --init
 
-      - name: Patch WS2812 driver for direct hardware test
+            - name: Patch WS2812 driver for direct hardware test
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           path = Path("pico-keys-sdk/src/led/led_ws2812.c")
           text = path.read_text()
 
-          # Force WS2812 GPIO to GPIO16.
-          gpio_pattern = re.compile(
-              r'    uint8_t gpio = 0;\n'
-              r'#ifdef PICO_DEFAULT_WS2812_PIN\n'
-              r'        gpio = PICO_DEFAULT_WS2812_PIN;\n'
-              r'#endif\n'
-              r'        if \(phy_data\.led_gpio_present\) \{\n'
-              r'            gpio = phy_data\.led_gpio;\n'
-              r'        \}\n'
-          )
+          # ---------------------------------------------------------
+          # 1. Force WS2812 to GPIO16
+          # ---------------------------------------------------------
+          old_gpio = """    uint8_t gpio = 0;
+          #ifdef PICO_DEFAULT_WS2812_PIN
+              gpio = PICO_DEFAULT_WS2812_PIN;
+          #endif
+              if (phy_data.led_gpio_present) {
+                  gpio = phy_data.led_gpio;
+              }
+          """
 
-          gpio_replacement = (
-              '    uint8_t gpio = 16;\n'
-          )
+          new_gpio = """    uint8_t gpio = 16;
+          """
 
-          text, count = gpio_pattern.subn(
-              gpio_replacement,
-              text,
-              count=1
-          )
-
-          if count != 1:
+          if old_gpio not in text:
               raise SystemExit(
-                  "ERROR: could not patch WS2812 GPIO block"
+                  "ERROR: original WS2812 GPIO block not found"
               )
 
-          # Force GRB color order.
-          order_pattern = re.compile(
-              r'    uint8_t order = phy_data\.led_order_present \? '
-              r'phy_data\.led_order : PHY_LED_ORDER_GRB;\n'
-              r'    switch \(order\) \{\n'
-              r'.*?'
-              r'    \}\n',
-              re.DOTALL
-          )
+          text = text.replace(old_gpio, new_gpio, 1)
 
-          order_replacement = (
-              '    return urgb_ordered_u32(g, r, b);\n'
-          )
+          # ---------------------------------------------------------
+          # 2. Force GRB color order
+          # ---------------------------------------------------------
+          old_order = """    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PHY_LED_ORDER_GRB;
+              switch (order) {
+                  case PHY_LED_ORDER_RBG:
+                      return urgb_ordered_u32(r, b, g);
+                  case PHY_LED_ORDER_GRB:
+                      return urgb_ordered_u32(g, r, b);
+                  case PHY_LED_ORDER_GBR:
+                      return urgb_ordered_u32(g, b, r);
+                  case PHY_LED_ORDER_BRG:
+                      return urgb_ordered_u32(b, r, g);
+                  case PHY_LED_ORDER_BGR:
+                      return urgb_ordered_u32(b, g, r);
+                  case PHY_LED_ORDER_RGB:
+                  default:
+                      return urgb_ordered_u32(r, g, b);
+              }
+          """
 
-          text, count = order_pattern.subn(
-              order_replacement,
-              text,
-              count=1
-          )
+          new_order = """    return urgb_ordered_u32(g, r, b);
+          """
 
-          if count != 1:
+          if old_order not in text:
               raise SystemExit(
-                  "ERROR: could not patch WS2812 color order"
+                  "ERROR: original WS2812 color-order block not found"
               )
 
-          # Force 100% brightness and ignore PHY brightness/dimming.
-          brightness_pattern = re.compile(
-              r'    if \(!\(phy_data\.opts & PHY_OPT_DIMM\)\) \{\n'
-              r'        progress = progress >= 0\.5 \? 1 : 0;\n'
-              r'    \}\n'
-              r'    uint32_t led_phy_btness = '
-              r'phy_data\.led_brightness_present \? '
-              r'phy_data\.led_brightness : MAX_BTNESS;\n'
-              r'\n'
-              r'    float brightness = '
-              r'\(\(float\)led_brightness / MAX_BTNESS\) \* '
-              r'\(\(float\)led_phy_btness / MAX_BTNESS\) \* progress;\n'
-          )
+          text = text.replace(old_order, new_order, 1)
 
-          brightness_replacement = (
-              '    float brightness = progress >= 0.5 ? 1.0f : 0.0f;\n'
-          )
+          # ---------------------------------------------------------
+          # 3. Force maximum brightness and ignore PHY brightness
+          # ---------------------------------------------------------
+          old_brightness = """    if (!(phy_data.opts & PHY_OPT_DIMM)) {
+                  progress = progress >= 0.5 ? 1 : 0;
+              }
+              uint32_t led_phy_btness = phy_data.led_brightness_present ? phy_data.led_brightness : MAX_BTNESS;
 
-          text, count = brightness_pattern.subn(
-              brightness_replacement,
-              text,
-              count=1
-          )
+              float brightness = ((float)led_brightness / MAX_BTNESS) * ((float)led_phy_btness / MAX_BTNESS) * progress;
+          """
 
-          if count != 1:
+          new_brightness = """    float brightness = progress >= 0.5 ? 1.0f : 0.0f;
+          """
+
+          if old_brightness not in text:
               raise SystemExit(
-                  "ERROR: could not patch WS2812 brightness"
+                  "ERROR: original WS2812 brightness block not found"
               )
+
+          text = text.replace(old_brightness, new_brightness, 1)
 
           path.write_text(text)
-          print("Direct WS2812 hardware-test patch applied.")
+          print("Direct WS2812 hardware-test patch applied successfully.")
           PY
 
       - name: Patch firmware for direct LED test loop
