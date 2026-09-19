@@ -1,0 +1,152 @@
+name: Build RP2350 USB - Pico FIDO Final GPIO22
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      # ============================================================
+      # Checkout do Pico FIDO normal
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ============================================================
+      # Toolchain
+      # ============================================================
+      - name: Install toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            cmake \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
+
+      # ============================================================
+      # Pico SDK 2.1.1
+      # ============================================================
+      - name: Install Pico SDK
+        run: |
+          git clone https://github.com/raspberrypi/pico-sdk
+          cd pico-sdk
+          git checkout 2.1.1
+          git submodule update --init
+
+      # ============================================================
+      # Correção específica da RP2350 USB
+      #
+      # Nossa placa possui WS2812 no GPIO22.
+      #
+      # Não alteramos main.c.
+      # Não alteramos o fluxo USB/FIDO.
+      # Não criamos loop de teste.
+      #
+      # Apenas corrigimos a seleção do LED.
+      # ============================================================
+      - name: Configure WS2812 for RP2350 USB GPIO22
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("pico-keys-sdk/src/led/led.c")
+          text = path.read_text()
+
+          needle = "void led_init(void) {\n"
+
+          patch = (
+              "void led_init(void) {\n"
+              "\n"
+              "    /*\n"
+              "     * RP2350 USB board-specific LED configuration.\n"
+              "     * The onboard WS2812 data input is connected to GPIO22.\n"
+              "     */\n"
+              "    phy_data.led_driver = PHY_LED_DRIVER_WS2812;\n"
+              "    phy_data.led_driver_present = true;\n"
+              "\n"
+              "    phy_data.led_gpio = 22;\n"
+              "    phy_data.led_gpio_present = true;\n"
+              "\n"
+              "    phy_data.led_order = PHY_LED_ORDER_GRB;\n"
+              "    phy_data.led_order_present = true;\n"
+              "\n"
+              "    phy_data.led_brightness = MAX_BTNESS;\n"
+              "    phy_data.led_brightness_present = true;\n"
+          )
+
+          if needle not in text:
+              raise SystemExit(
+                  "ERROR: led_init() was not found"
+              )
+
+          if "phy_data.led_gpio = 22;" in text:
+              raise SystemExit(
+                  "ERROR: GPIO22 configuration already exists. "
+                  "Refusing to patch twice."
+              )
+
+          text = text.replace(
+              needle,
+              patch,
+              1
+          )
+
+          path.write_text(text)
+
+          print(
+              "RP2350 USB LED configuration applied: "
+              "WS2812 / GPIO22 / GRB"
+          )
+          PY
+
+      # ============================================================
+      # Verificação
+      # ============================================================
+      - name: Verify final LED configuration
+        run: |
+          echo "=================================================="
+          echo "FINAL LED CONFIGURATION"
+          echo "=================================================="
+
+          grep -A18 -B2 \
+            "RP2350 USB board-specific LED configuration" \
+            pico-keys-sdk/src/led/led.c
+
+          echo "=================================================="
+          echo "PICO BOARD"
+          echo "=================================================="
+
+          grep -R \
+            "PICO_DEFAULT_WS2812_PIN" \
+            pico-sdk/src/boards/include/boards/waveshare_rp2350_zero.h
+
+      # ============================================================
+      # Build normal do Pico FIDO
+      # ============================================================
+      - name: Build RP2350 USB final firmware
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+        run: |
+          mkdir -p build
+          cd build
+
+          cmake .. -DPICO_BOARD=waveshare_rp2350_zero
+
+          make -j$(nproc)
+
+      # ============================================================
+      # Upload do firmware final
+      # ============================================================
+      - name: Upload final UF2
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-fido-rp2350-usb-gpio22-final
+          path: build/pico_fido.uf2
