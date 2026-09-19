@@ -1,4 +1,4 @@
-name: Build RP2350 Zero - Force LED
+name: Build RP2350 Zero - LED Hardware Test
 
 on:
   workflow_dispatch:
@@ -32,47 +32,108 @@ jobs:
           git checkout 2.1.1
           git submodule update --init
 
-      - name: Force LED configuration for Waveshare RP2350 Zero
+      - name: Patch firmware for direct WS2812 hardware test
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("pico-keys-sdk/src/led/led.c")
+          path = Path("pico-keys-sdk/src/main.c")
           text = path.read_text()
 
-          needle = "void led_init(void) {\n"
+          # ---------------------------------------------------------
+          # Ensure sleep_ms() is available.
+          # ---------------------------------------------------------
+          include_marker = '#include "pico/stdio.h"\n'
+          include_replacement = (
+              '#include "pico/stdio.h"\n'
+              '#include "pico/time.h"\n'
+          )
 
-          block = """void led_init(void) {
-          #ifdef WAVESHARE_RP2350_ZERO
-              phy_data.led_driver = PHY_LED_DRIVER_WS2812;
-              phy_data.led_gpio = PICO_DEFAULT_WS2812_PIN;
+          if include_marker not in text:
+              raise SystemExit(
+                  "ERROR: pico/stdio.h include not found"
+              )
 
-              phy_data.led_driver_present = true;
-              phy_data.led_gpio_present = true;
+          if '#include "pico/time.h"\n' not in text:
+              text = text.replace(
+                  include_marker,
+                  include_replacement,
+                  1
+              )
 
-              phy_data.led_order = PHY_LED_ORDER_GRB;
-              phy_data.led_order_present = true;
+          # ---------------------------------------------------------
+          # Replace normal LED initialization with a direct
+          # WS2812 hardware test.
+          # ---------------------------------------------------------
+          old_block = (
+              '    led_init();\n'
+              '\n'
+              '    usb_init();\n'
+          )
 
-              phy_data.led_brightness = MAX_BTNESS;
-              phy_data.led_brightness_present = true;
+          new_block = (
+              '    /* Direct WS2812 hardware test. */\n'
+              '    extern led_driver_t led_driver_ws2812;\n'
+              '\n'
+              '    /* Force Waveshare RP2350 Zero onboard LED parameters. */\n'
+              '    phy_data.led_gpio = 16;\n'
+              '    phy_data.led_gpio_present = true;\n'
+              '    phy_data.led_driver = PHY_LED_DRIVER_WS2812;\n'
+              '    phy_data.led_driver_present = true;\n'
+              '    phy_data.led_order = PHY_LED_ORDER_GRB;\n'
+              '    phy_data.led_order_present = true;\n'
+              '    phy_data.led_brightness = MAX_BTNESS;\n'
+              '    phy_data.led_brightness_present = true;\n'
+              '    phy_data.opts |= PHY_OPT_DIMM;\n'
+              '\n'
+              '    led_driver = &led_driver_ws2812;\n'
+              '    led_driver->init();\n'
+              '\n'
+              '    while (true) {\n'
+              '        led_driver->set_color(LED_COLOR_RED, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_GREEN, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_BLUE, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_WHITE, MAX_BTNESS, 1.0f);\n'
+              '        sleep_ms(1000);\n'
+              '\n'
+              '        led_driver->set_color(LED_COLOR_OFF, 0, 0.0f);\n'
+              '        sleep_ms(500);\n'
+              '    }\n'
+              '\n'
+              '    usb_init();\n'
+          )
 
-              phy_data.opts &= ~PHY_OPT_DIMM;
-          #endif
-          """
+          if old_block not in text:
+              raise SystemExit(
+                  "ERROR: led_init()/usb_init() block not found"
+              )
 
-          if needle not in text:
-              raise SystemExit("ERROR: led_init() not found")
+          text = text.replace(
+              old_block,
+              new_block,
+              1
+          )
 
-          if "WAVESHARE_RP2350_ZERO" in text:
-              raise SystemExit("ERROR: patch appears to already be present")
+          path.write_text(text)
 
-          path.write_text(text.replace(needle, block, 1))
-          print("LED patch applied successfully.")
+          print("Direct WS2812 hardware-test firmware patch applied.")
           PY
 
-      - name: Verify LED patch
+      - name: Verify hardware-test patch
         run: |
-          grep -A18 -B2 "WAVESHARE_RP2350_ZERO" pico-keys-sdk/src/led/led.c
+          echo "=== Direct WS2812 configuration ==="
+          grep -A18 -B3 "Direct WS2812 hardware test" \
+            pico-keys-sdk/src/main.c
+
+          echo "=== LED color sequence ==="
+          grep -A22 "while (true)" \
+            pico-keys-sdk/src/main.c
 
       - name: Build RP2350 Zero
         env:
@@ -86,5 +147,5 @@ jobs:
       - name: Upload UF2
         uses: actions/upload-artifact@v4
         with:
-          name: pico-fido-rp2350-zero-force-led
+          name: pico-fido-rp2350-zero-led-hardware-test
           path: build/pico_fido.uf2
