@@ -32,7 +32,7 @@ jobs:
           git checkout 2.1.1
           git submodule update --init
 
-      - name: Patch WS2812 driver for direct hardware test
+           - name: Patch WS2812 driver for direct hardware test
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -40,6 +40,9 @@ jobs:
           path = Path("pico-keys-sdk/src/led/led_ws2812.c")
           text = path.read_text()
 
+          # ---------------------------------------------------------
+          # 1. Force WS2812 to GPIO16
+          # ---------------------------------------------------------
           old_gpio = """    uint8_t gpio = 0;
           #ifdef PICO_DEFAULT_WS2812_PIN
               gpio = PICO_DEFAULT_WS2812_PIN;
@@ -53,10 +56,15 @@ jobs:
           """
 
           if old_gpio not in text:
-              raise SystemExit("ERROR: WS2812 GPIO block not found")
+              raise SystemExit(
+                  "ERROR: original WS2812 GPIO block not found"
+              )
 
           text = text.replace(old_gpio, new_gpio, 1)
 
+          # ---------------------------------------------------------
+          # 2. Force GRB color order
+          # ---------------------------------------------------------
           old_order = """    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PHY_LED_ORDER_GRB;
               switch (order) {
                   case PHY_LED_ORDER_RBG:
@@ -79,10 +87,15 @@ jobs:
           """
 
           if old_order not in text:
-              raise SystemExit("ERROR: WS2812 color-order block not found")
+              raise SystemExit(
+                  "ERROR: original WS2812 color-order block not found"
+              )
 
           text = text.replace(old_order, new_order, 1)
 
+          # ---------------------------------------------------------
+          # 3. Force maximum brightness and ignore PHY brightness
+          # ---------------------------------------------------------
           old_brightness = """    if (!(phy_data.opts & PHY_OPT_DIMM)) {
                   progress = progress >= 0.5 ? 1 : 0;
               }
@@ -95,12 +108,14 @@ jobs:
           """
 
           if old_brightness not in text:
-              raise SystemExit("ERROR: WS2812 brightness block not found")
+              raise SystemExit(
+                  "ERROR: original WS2812 brightness block not found"
+              )
 
           text = text.replace(old_brightness, new_brightness, 1)
 
           path.write_text(text)
-          print("Direct WS2812 hardware-test patch applied.")
+          print("Direct WS2812 hardware-test patch applied successfully.")
           PY
 
       - name: Patch firmware main loop for LED test
