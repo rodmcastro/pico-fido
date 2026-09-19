@@ -1,0 +1,83 @@
+name: Build RP2350 Zero - Force LED
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            cmake \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
+
+      - name: Install Pico SDK
+        run: |
+          git clone https://github.com/raspberrypi/pico-sdk
+          cd pico-sdk
+          git checkout 2.1.1
+          git submodule update --init
+
+      - name: Force LED configuration for Waveshare RP2350 Zero
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("pico-keys-sdk/src/led/led.c")
+          text = path.read_text()
+
+          needle = "void led_init(void) {\n"
+
+          block = """void led_init(void) {
+          #ifdef WAVESHARE_RP2350_ZERO
+              phy_data.led_driver = PHY_LED_DRIVER_WS2812;
+              phy_data.led_gpio = PICO_DEFAULT_WS2812_PIN;
+              phy_data.led_driver_present = true;
+              phy_data.led_gpio_present = true;
+              phy_data.led_order = PHY_LED_ORDER_GRB;
+              phy_data.led_order_present = true;
+          #endif
+          """
+
+          if needle not in text:
+              raise SystemExit("ERROR: led_init() not found")
+
+          if "WAVESHARE_RP2350_ZERO" in text:
+              raise SystemExit("ERROR: patch appears to already be present")
+
+          path.write_text(text.replace(needle, block, 1))
+          print("LED patch applied successfully.")
+          PY
+
+      - name: Verify LED patch
+        run: |
+          grep -A10 -B2 "WAVESHARE_RP2350_ZERO" pico-keys-sdk/src/led/led.c
+
+      - name: Build RP2350 Zero
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DPICO_BOARD=waveshare_rp2350_zero
+          make -j$(nproc)
+
+      - name: Upload UF2
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-fido-rp2350-zero-force-led
+          path: build/pico_fido.uf2
